@@ -1,0 +1,152 @@
+// Set up variables for Bloom.io API and Notion database
+const bloomApi = 'YOUR_BLOOM_API_KEY';
+const notionDbId = 'ID_OF_YOUR_NOTION_DATABASE';
+const notionApiKey = 'YOUR_NOTION_API_KEY';
+
+// Function to check if an email response has been received from a client
+async function checkResponseReceived(requestDate) {
+  const today = new Date().toISOString().split('T')[0];  // Current date
+  const notionApiUrl = `https://api.notion.com/v1/databases/${notionDbId}/query`;
+
+  const response = await fetch(notionApiUrl, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${notionApiKey}`,
+      'Content-Type': 'application/json',
+      'Notion-Version': '2024-09-25',
+    },
+    body: JSON.stringify({
+      filter: {
+        and: [
+          {
+            property: 'Response Received',
+            checkbox: {
+              equals: false
+            }
+          },
+          {
+            property: 'Last Follow-Up Date',
+            date: {
+              before: today // Make sure last follow-up was not today
+            }
+          }
+        ]
+      }
+    })
+  });
+
+  const data = await response.json();
+  
+  // Continue processing if the request needs follow-up
+  return data.results && data.results.length > 0;
+}
+
+// Function to update "Last Follow-Up Date" after sending email
+async function updateLastFollowUpDate(rowId) {
+  const today = new Date().toISOString().split('T')[0];
+  const notionUpdateUrl = `https://api.notion.com/v1/pages/${rowId}`;
+
+  await fetch(notionUpdateUrl, {
+    method: 'PATCH',
+    headers: {
+      'Authorization': `Bearer ${notionApiKey}`,
+      'Content-Type': 'application/json',
+      'Notion-Version': '2024-09-25',
+    },
+    body: JSON.stringify({
+      properties: {
+        'Last Follow-Up Date': {
+          date: { start: today }
+        }
+      }
+    })
+  });
+}
+
+// Function to send a follow-up email using Bloom.io API and update the follow-up date
+async function sendFollowUpEmail(requestId, rowId) {
+  const bloomApiUrl = `https://api.bloom.io/v1/requests/${requestId}/follow_up`;
+
+  try {
+    const response = await fetch(bloomApiUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${bloomApi}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        subject: "Follow-up on your request",
+        message: "We are following up on your request. Please let us know if you need further assistance.",
+      })
+    });
+
+    const result = await response.json();
+    if (response.ok) {
+      console.log('Follow-up email sent successfully:', result);
+      
+      // Update "Last Follow-Up Date" after email is sent
+      await updateLastFollowUpDate(rowId);
+    } else {
+      console.error('Error sending follow-up email:', result);
+    }
+  } catch (error) {
+    console.error('Error sending follow-up email:', error);
+  }
+}
+
+// Main script logic with defensive checks
+async function main() {
+  const now = new Date().toISOString().split('T')[0];  // Get current date in YYYY-MM-DD format
+
+  try {
+    const notionApiUrl = `https://api.notion.com/v1/databases/${notionDbId}/query`;
+    const response = await fetch(notionApiUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${notionApiKey}`,
+        'Content-Type': 'application/json',
+        'Notion-Version': '2024-09-25',
+      },
+      body: JSON.stringify({
+        filter: {
+          property: 'Response Received',
+          checkbox: {
+            equals: false  // Filter requests that haven't received a response
+          }
+        }
+      })
+    });
+
+    const data = await response.json();
+    const rows = data.results;
+
+    if (!rows || rows.length === 0) {
+      console.log("No rows found that need follow-up.");
+      return;  // Exit if there are no rows
+    }
+
+    for (const row of rows) {
+      const requestDate = row.properties?.['Request Date']?.date?.start;  // Safely access 'Request Date'
+      const requestId = row.properties?.['Request ID']?.rich_text?.[0]?.plain_text;  // Safely access 'Request ID'
+      const rowId = row.id; // This will be used to update "Last Follow-Up Date" after sending email
+
+      // Check if fields are available before proceeding
+      if (!requestDate || !requestId || !rowId) {
+        console.error("Missing required data (Request Date, Request ID, or row ID). Skipping row.");
+        continue;  // Skip to the next row if any required field is missing
+      }
+
+      // Check if a response has been received, and if not, send follow-up email
+      if (await checkResponseReceived(requestDate)) {
+        await sendFollowUpEmail(requestId, rowId);  // Pass requestId and rowId
+      }
+    }
+  } catch (error) {
+    console.error('Error querying Notion database:', error);
+  }
+}
+
+// Run the main script every hour to check for new requests and send follow-ups as needed
+setInterval(() => {
+  main().catch((error) => console.error('Error in main script:', error));
+}, 3600000);
